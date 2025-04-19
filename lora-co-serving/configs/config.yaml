@@ -1,7 +1,7 @@
 # Configuration file for the system
 
 model:
-  name: "Qwen/Qwen2-0.5B-Instruct" # Base model ID
+  name: "./models_store/Qwen-Qwen2-0.5B-Instruct" # Local path where the model was downloaded
 
 controller:
   inference_batch_size: 4

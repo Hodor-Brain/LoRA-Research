@@ -175,3 +175,6 @@ cython_debug/
 
 # Idea files
 .idea/
+
+# model files
+models_store/
