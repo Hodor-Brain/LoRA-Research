@@ -8,6 +8,7 @@ from utils.logger_config import setup_logger
 from utils.config_loader import load_config
 from core.models import load_base_model
 from managers.adapter_manager import LoRAAdapterManager
+from core.engine import InferenceEngine
 
 if __name__ == "__main__":
     # --- Setup ---
@@ -56,13 +57,59 @@ if __name__ == "__main__":
         logger.error(f"Failed during adapter loading call for {placeholder_adapter_path}. Exiting.")
         sys.exit(1)
 
-    # --- Placeholder for future steps --- 
-    # 3. Run basic inference (non-batched)
-    logger.info("Skipping non-batched inference test for now.")
+    # --- 3. Run basic inference (non-batched) ---
+    logger.info("Initializing Inference Engine...")
+    inference_engine = InferenceEngine(
+        model=model,
+        tokenizer=tokenizer,
+        adapter_manager=adapter_manager,
+        device=device
+    )
+    logger.info("Inference engine initialized.")
 
-    # 4. Run batched inference (same adapter)
-    logger.info("Skipping batched inference test for now.")
+    test_prompt = "Once upon a time,"
+    logger.info(f"Running single inference with prompt: '{test_prompt}' (Base Model)")
+    generated_text_base = inference_engine.run_inference_single(prompt=test_prompt, adapter_path=None)
 
-    logger.info(" === Phase 1 Test Partial Completion (Base Model Load) === ")
+    if generated_text_base:
+        logger.info(f"Generated Text (Base Model): '{generated_text_base}'")
+    else:
+        logger.error("Inference failed for base model.")
+    
+    # Test with placeholder adapter (should also use base model due to loading skip)
+    logger.info(f"Running single inference with prompt: '{test_prompt}' (Placeholder Adapter Path)")
+    generated_text_adapter = inference_engine.run_inference_single(prompt=test_prompt, adapter_path=placeholder_adapter_path)
+
+    if generated_text_adapter:
+        logger.info(f"Generated Text (Placeholder Adapter Path): '{generated_text_adapter}'")
+    else:
+        logger.error(f"Inference failed for placeholder adapter path.")
+
+    # --- 4. Run batched inference (same adapter) ---
+    logger.info("Testing batched inference (Base Model)...")
+    batch_prompts = [
+        "The capital of France is",
+        "Explain the theory of relativity in simple terms:",
+        "Write a short poem about a cat:"
+    ]
+    batch_requests = [
+        {'prompt': p, 'adapter_path': None, 'max_new_tokens': 30} for p in batch_prompts
+    ]
+
+    batch_results = inference_engine.process_batch(batch_requests)
+
+    if batch_results:
+        logger.info("Batch inference call completed.")
+        for i, result in enumerate(batch_results):
+            if result:
+                logger.info(f"Batch [{i}] Prompt: '{batch_prompts[i]}'")
+                logger.info(f"Batch [{i}] Result: '{result}'")
+            else:
+                logger.error(f"Batch [{i}] failed.")
+    else:
+        logger.error("Batch inference call failed entirely.")
+
+    # logger.info(" === Phase 1 Test Partial Completion (Single Inference) === ")
+    logger.info(" === Phase 1 Test Completed (Including Batched Inference) === ")
 
     print("Phase 1 Test Complete.") 
