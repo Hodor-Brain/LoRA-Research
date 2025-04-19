@@ -24,6 +24,7 @@ def setup_logger(log_level=logging.INFO, log_to_file=True):
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(log_formatter)
+    console_handler.stream.reconfigure(encoding='utf-8', errors='replace')
     root_logger.addHandler(console_handler)
 
     if log_to_file:
@@ -38,7 +39,7 @@ def setup_logger(log_level=logging.INFO, log_to_file=True):
         log_filepath = os.path.join(LOG_DIR, log_filename)
 
         try:
-            file_handler = logging.FileHandler(log_filepath)
+            file_handler = logging.FileHandler(log_filepath, encoding='utf-8')
             file_handler.setFormatter(log_formatter)
             root_logger.addHandler(file_handler)
             root_logger.info(f"Logging initialized. Log file: {log_filepath}")
