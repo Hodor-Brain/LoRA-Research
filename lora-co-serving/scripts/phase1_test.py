@@ -85,31 +85,30 @@ if __name__ == "__main__":
     else:
         logger.error(f"Inference failed for placeholder adapter path.")
 
-    # --- 4. Run batched inference (same adapter) ---
-    logger.info("Testing batched inference (Base Model)...")
-    batch_prompts = [
-        "The capital of France is",
-        "Explain the theory of relativity in simple terms:",
-        "Write a short poem about a cat:"
-    ]
-    batch_requests = [
-        {'prompt': p, 'adapter_path': None, 'max_new_tokens': 30} for p in batch_prompts
+    # --- 4. Run batched inference (Mixed Adapters Test) ---
+    logger.info("Testing batched inference with mixed adapters (Base and Placeholder)...")
+    mixed_batch_requests = [
+        {'prompt': "The capital of France is", 'adapter_path': None, 'max_new_tokens': 10}, # Base
+        {'prompt': "What is PEFT?", 'adapter_path': placeholder_adapter_path, 'max_new_tokens': 25}, # Placeholder (will use base)
+        {'prompt': "Tell me a joke.", 'adapter_path': None, 'max_new_tokens': 30}, # Base
+        {'prompt': "Calculate 5 * 8", 'adapter_path': placeholder_adapter_path, 'max_new_tokens': 5} # Placeholder (will use base)
     ]
 
-    batch_results = inference_engine.process_batch(batch_requests)
+    mixed_batch_results = inference_engine.process_batch(mixed_batch_requests)
 
-    if batch_results:
-        logger.info("Batch inference call completed.")
-        for i, result in enumerate(batch_results):
+    if mixed_batch_results:
+        logger.info("Mixed batch inference call completed.")
+        for i, result in enumerate(mixed_batch_results):
+            req = mixed_batch_requests[i]
+            adapter_info = req['adapter_path'] if req['adapter_path'] else "Base Model"
             if result:
-                logger.info(f"Batch [{i}] Prompt: '{batch_prompts[i]}'")
-                logger.info(f"Batch [{i}] Result: '{result}'")
+                logger.info(f"MixedBatch [{i}] Adapter: '{adapter_info}' Prompt: '{req['prompt']}'")
+                logger.info(f"MixedBatch [{i}] Result: '{result}'")
             else:
-                logger.error(f"Batch [{i}] failed.")
+                logger.error(f"MixedBatch [{i}] Adapter: '{adapter_info}' Prompt: '{req['prompt']}' -> FAILED")
     else:
-        logger.error("Batch inference call failed entirely.")
+        logger.error("Mixed batch inference call failed entirely.")
 
-    # logger.info(" === Phase 1 Test Partial Completion (Single Inference) === ")
-    logger.info(" === Phase 1 Test Completed (Including Batched Inference) === ")
+    logger.info(" === Phase 1 & 3 (Partial) Test Completed === ")
 
-    print("Phase 1 Test Complete.") 
+    print("Phase 1/3 Test Complete.") 

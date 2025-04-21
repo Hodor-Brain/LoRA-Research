@@ -3,6 +3,7 @@
 import logging
 from typing import Optional, List, Dict, Any
 import torch
+from collections import defaultdict
 
 from managers.adapter_manager import LoRAAdapterManager
 from transformers import PreTrainedModel, PreTrainedTokenizer
@@ -31,10 +32,10 @@ class InferenceEngine:
                  raise ValueError("Tokenizer missing both pad and EOS token in InferenceEngine.")
 
     def process_batch(self, inference_requests: List[Dict[str, Any]]) -> List[Optional[str]]:
-        """Processes a batch of inference requests.
+        """Processes a batch of inference requests, handling multiple adapters.
 
-        Currently assumes all requests in the batch target the same adapter
-        (or the base model if adapter_path is None/consistent).
+        Groups requests by adapter path, loads the required adapter (using cache),
+        runs generation for each group, and returns results in the original order.
 
         Args:
             inference_requests (List[Dict[str, Any]]): A list of dictionaries,
@@ -43,50 +44,64 @@ class InferenceEngine:
 
         Returns:
             List[Optional[str]]: A list of generated texts (excluding prompts),
-                                or None for failed requests.
+                                matching the order of input requests. None for failed requests.
         """
         if not inference_requests:
             return []
 
-        # TODO: Later phases need to group requests by adapter_path
-        first_request = inference_requests[0]
-        adapter_path = first_request.get('adapter_path')
-        max_new_tokens = first_request.get('max_new_tokens', 50)
+        results = [None] * len(inference_requests)
+        grouped_requests = defaultdict(list)
+        original_indices = defaultdict(list)
 
-        logger.info(f"Processing batch of {len(inference_requests)} requests for adapter: '{adapter_path if adapter_path else 'Base Model'}'")
+        for i, req in enumerate(inference_requests):
+            adapter_path = req.get('adapter_path')
+            grouped_requests[adapter_path].append(req['prompt'])
+            original_indices[adapter_path].append(i)
 
-        target_model = self.base_model
-        if adapter_path:
-            model_with_adapter = self.adapter_manager.load_inference_adapter(adapter_path)
-            if model_with_adapter is None:
-                logger.error(f"Failed to get model instance for adapter {adapter_path}. Cannot process batch.")
-                return [None] * len(inference_requests)
-            target_model = model_with_adapter
+        logger.info(f"Processing batch of {len(inference_requests)} requests, grouped into {len(grouped_requests)} sub-batches by adapter.")
 
-        prompts = [req['prompt'] for req in inference_requests]
+        for adapter_path, prompts in grouped_requests.items():
+            logger.info(f"Processing sub-batch for adapter: '{adapter_path if adapter_path else 'Base Model'}' ({len(prompts)} prompts)")
+            
+            target_model = self.base_model
+            if adapter_path:
+                model_with_adapter = self.adapter_manager.load_inference_adapter(adapter_path)
+                if model_with_adapter is None:
+                    logger.error(f"Failed to load adapter {adapter_path}. Skipping sub-batch.")
+                    continue
+                target_model = model_with_adapter
+            
+            # TODO: A more robust approach might average or validate settings across the group
+            first_req_idx = original_indices[adapter_path][0]
+            max_new_tokens = inference_requests[first_req_idx].get('max_new_tokens', 50)
 
-        try:
-            inputs = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            input_ids_len = inputs['input_ids'].shape[1]
+            try:
+                inputs = self.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)
+                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                input_ids_len = inputs['input_ids'].shape[1] 
 
-            with torch.no_grad():
-                outputs = target_model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id
-                )
+                with torch.no_grad():
+                    outputs = target_model.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id
+                    )
 
-            batch_output_ids = outputs[:, input_ids_len:]
-            generated_texts = self.tokenizer.batch_decode(batch_output_ids, skip_special_tokens=True)
+                batch_output_ids = outputs[:, input_ids_len:]
+                generated_texts = self.tokenizer.batch_decode(batch_output_ids, skip_special_tokens=True)
 
-            logger.info(f"Batch inference successful. Generated {len(generated_texts)} responses.")
-            return generated_texts
+                indices_for_group = original_indices[adapter_path]
+                for i, generated_text in enumerate(generated_texts):
+                    original_index = indices_for_group[i]
+                    results[original_index] = generated_text
+                logger.info(f"Sub-batch for adapter '{adapter_path if adapter_path else 'Base Model'}' processed successfully.")
 
-        except Exception as e:
-            logger.error(f"Error during batch inference: {e}", exc_info=True)
-            return [None] * len(inference_requests)
+            except Exception as e:
+                logger.error(f"Error processing sub-batch for adapter '{adapter_path if adapter_path else 'Base Model'}': {e}", exc_info=True)
+
+        logger.info(f"Batch processing finished. Returning {len(results)} results.")
+        return results
 
     def run_inference_single(self, prompt: str, adapter_path: Optional[str] = None, max_new_tokens: int = 50) -> Optional[str]:
         """Runs inference for a single prompt, potentially using a LoRA adapter.
