@@ -3,12 +3,13 @@
 import logging
 import time
 import torch
+import os
 from typing import Dict, Optional
 
 from utils.config_loader import SystemConfig
 from core.engine import InferenceEngine
 from managers.job_manager import ActiveTrainingJobManager, JobStatus
-from managers.adapter_manager import LoRAAdapterManager
+from managers.adapter_manager import LoRAAdapterManager, OPTIMIZER_NAME
 from managers.queue_manager import QueueManager
 from prioritization.base_strategy import BasePrioritizationStrategy
 from core.training import setup_lora_training, execute_training_step, SimpleTextDataset
@@ -42,6 +43,11 @@ class MainController:
         new_job_details = self.queue_manager.get_new_training_job()
         if new_job_details:
             job_id = new_job_details.get('job_id')
+            if not new_job_details.get('adapter_save_path'):
+                 default_save_path = os.path.join("./adapters", f"job_{job_id}")
+                 logger.warning(f"adapter_save_path not provided for job {job_id}, defaulting to {default_save_path}")
+                 new_job_details['adapter_save_path'] = default_save_path
+            
             logger.info(f"Received new training job request: {job_id}")
             registered_id = self.job_manager.register_job(new_job_details)
             if registered_id:
@@ -60,15 +66,10 @@ class MainController:
 
         logger.info(f"Preparing runtime for job {job_id}...")
         # --- Setup LoRA Model for this specific job ---
-        # TODO: Revisit how PEFT model state is managed per job vs shared base
+        # NOTE: LoRA layers are typically added ONCE using get_peft_model.
 
-        try:
-            optimizer = None
-            logger.info(f"Optimizer placeholder set for job {job_id}.")
-        except Exception as e:
-            logger.error(f"Failed to initialize optimizer for job {job_id}: {e}")
-            self.job_manager.fail_job(job_id, "Optimizer setup failed")
-            return
+        optimizer = None
+        logger.info(f"Optimizer placeholder set for job {job_id}.")
 
         # TODO: Replace with actual data loading based on job_state.dataset_ref
         dummy_texts = [f"Data for job {job_id}, sample {i}." for i in range(8)]
@@ -83,7 +84,6 @@ class MainController:
             'data_iterator': iter(train_dataloader)
         }
         
-
     def _decide_mode(self) -> str:
         """Decides whether to run Inference or Training next."""
         if self.queue_manager.get_inference_queue_size() > 0:
@@ -129,30 +129,50 @@ class MainController:
              logger.error(f"Selected job {selected_job_id} has no state or runtime info. Skipping.")
              return
 
-        # TODO: Implement adapter_manager.load_training_state(selected_job_id)
+        adapter_path = job_state.adapter_save_path
+        if not adapter_path:
+            logger.error(f"adapter_save_path not defined for job {selected_job_id}. Skipping step.")
+            self.job_manager.fail_job(selected_job_id, "adapter_save_path missing")
+            return
+        optimizer_path = os.path.join(adapter_path, OPTIMIZER_NAME)
 
-        logger.info(f"Loading training state for job {selected_job_id} (Placeholder)... ")
-        loaded_adapter_model, loaded_optimizer_state_dict = self.adapter_manager.load_training_state(selected_job_id)
+        logger.info(f"Loading training state for job '{selected_job_id}' from {adapter_path}")
+        loaded_adapter_model, loaded_optimizer_state_dict = self.adapter_manager.load_training_state(
+            job_id=selected_job_id, 
+            adapter_path=adapter_path 
+        )
         if loaded_adapter_model is None:
-             logger.error(f"Failed to load adapter for training job {selected_job_id}. Skipping step.")
              self.job_manager.fail_job(selected_job_id, "Adapter loading failed")
+             self.active_training_jobs.pop(selected_job_id, None) 
              return
         
-        current_peft_model = loaded_adapter_model 
+        current_peft_model = loaded_adapter_model
         
         job_runtime = self.active_training_jobs[selected_job_id]
         optimizer = job_runtime.get('optimizer')
         if optimizer is None:
             logger.info(f"Creating optimizer for job {selected_job_id}...")
             try:
+                 trainable_params = list(current_peft_model.parameters())
+                 if not any(p.requires_grad for p in trainable_params):
+                      logger.error(f"Model for job {selected_job_id} has no trainable parameters! Check LoRA setup.")
+                      raise ValueError("No trainable parameters found.")
+                 
                  optimizer = AdamW(current_peft_model.parameters(), lr=job_state.training_params.get('lr', 5e-5))
                  job_runtime['optimizer'] = optimizer
+                 logger.info(f"Optimizer created for job {selected_job_id}.")
                  if loaded_optimizer_state_dict:
-                      logger.info(f"Loading optimizer state for job {selected_job_id}.")
+                      logger.info(f"Loading optimizer state for job {selected_job_id} from {optimizer_path}.")
                       optimizer.load_state_dict(loaded_optimizer_state_dict)
+                      logger.info(f"Optimizer state loaded for job {selected_job_id}.")
+                      optimizer.load_state_dict(loaded_optimizer_state_dict)
+                      logger.info(f"Optimizer state loaded for job {selected_job_id}.")
+                 else:
+                      logger.info(f"No optimizer state found for job {selected_job_id}. Starting fresh.")
             except Exception as e:
-                logger.error(f"Failed to create/load optimizer for job {selected_job_id}: {e}")
+                logger.error(f"Failed to create/load optimizer for job {selected_job_id}: {e}", exc_info=True)
                 self.job_manager.fail_job(selected_job_id, "Optimizer setup failed")
+                self.active_training_jobs.pop(selected_job_id, None)
                 return
         else:
              logger.debug(f"Using existing optimizer for job {selected_job_id}.")
@@ -162,6 +182,7 @@ class MainController:
         if not data_iterator or not dataloader:
              logger.error(f"Missing dataloader/iterator for job {selected_job_id}. Skipping step.")
              self.job_manager.fail_job(selected_job_id, "Data loading error")
+             self.active_training_jobs.pop(selected_job_id, None)
              return
         
         try:
@@ -175,29 +196,44 @@ class MainController:
             except StopIteration:
                  logger.error(f"DataLoader for job {selected_job_id} is empty even after reset. Failing job.")
                  self.job_manager.fail_job(selected_job_id, "Empty dataset")
+                 self.active_training_jobs.pop(selected_job_id, None)
                  return
         except Exception as e:
              logger.error(f"Error getting batch for job {selected_job_id}: {e}", exc_info=True)
              self.job_manager.fail_job(selected_job_id, "Data loading error")
+             self.active_training_jobs.pop(selected_job_id, None)
              return
 
         loss = execute_training_step(current_peft_model, optimizer, batch, self.device)
 
         if loss is not None:
             self.job_manager.update_job_state(selected_job_id, step_increment=1, loss=loss)
-            logger.info(f"Training Step {job_state.current_step+1} completed for job {selected_job_id}. Loss: {loss:.4f}")
-            if job_state.max_steps is not None and job_state.current_step >= job_state.max_steps:
-                logger.info(f"Job {selected_job_id} reached max steps ({job_state.max_steps}). Marking as completed.")
+            logger.info(f"Training Step {job_state.current_step} completed for job {selected_job_id}. Loss: {loss:.4f}")
+            max_steps = job_state.max_steps
+            if max_steps is not None and job_state.current_step >= max_steps:
+                logger.info(f"Job {selected_job_id} reached max steps ({max_steps}). Marking as completed.")
                 self.job_manager.complete_job(selected_job_id)
-                self._save_job_adapter(selected_job_id, current_peft_model, optimizer)
+                self.adapter_manager.save_training_state(
+                    job_id=selected_job_id, 
+                    model_to_save=current_peft_model, 
+                    optimizer_state_dict=optimizer.state_dict(), 
+                    adapter_save_path=adapter_path
+                )
                 self.active_training_jobs.pop(selected_job_id, None)
+                self.adapter_manager.unload_training_adapter(selected_job_id)
+            else:
+                self.adapter_manager.save_training_state(
+                    job_id=selected_job_id,
+                    model_to_save=current_peft_model,
+                    optimizer_state_dict=optimizer.state_dict(),
+                    adapter_save_path=adapter_path
+                )
+
         else:
             self.job_manager.fail_job(selected_job_id, "Training step execution failed")
             self.active_training_jobs.pop(selected_job_id, None)
+            self.adapter_manager.unload_training_adapter(selected_job_id)
 
-        # TODO: Implement adapter_manager.save_training_state(selected_job_id, current_peft_model, optimizer.state_dict())
-        logger.info(f"Saving training state for job {selected_job_id} (Placeholder)... ")
-        self.adapter_manager.save_training_state(selected_job_id, current_peft_model, optimizer.state_dict())
 
     def run_loop(self):
         """Runs the main control loop, alternating between modes."""
@@ -213,8 +249,7 @@ class MainController:
                 elif mode == "training":
                     self._execute_training_batch()
                 elif mode == "idle":
-                    time.sleep(0.1) 
-                
+                    time.sleep(0.1)
 
             except KeyboardInterrupt:
                 logger.info("KeyboardInterrupt received. Stopping controller loop...")
@@ -222,7 +257,7 @@ class MainController:
             except Exception as e:
                  logger.error(f"Unexpected error in controller loop: {e}", exc_info=True)
                  time.sleep(1)
-        
+
         logger.info("Main Controller loop stopped.")
 
     def stop_loop(self):
