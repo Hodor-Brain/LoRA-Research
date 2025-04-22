@@ -2,7 +2,7 @@ import yaml
 from dataclasses import dataclass, field
 import logging
 import os
-from typing import Optional
+from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -13,15 +13,36 @@ class ModelConfig:
 @dataclass
 class ControllerConfig:
     inference_batch_size: int = 4
-    training_steps_per_batch: int = 1
+    training_batch_size: int = 1
 
 @dataclass
 class PrioritizationConfig:
-    strategy: str = "RoundRobin" # Needs to match class names like RoundRobinStrategy
+    strategy: str = "RoundRobin"
 
 @dataclass
 class ManagersConfig:
     adapter_cache_size: int = 3
+
+@dataclass
+class QueueConfig:
+    max_inference_queue_size: int = 100
+    max_training_queue_size: int = 10
+
+@dataclass
+class EngineConfig:
+    inference_batch_timeout_ms: int = 200
+
+@dataclass
+class LoraConfig:
+    r: int = 8
+    lora_alpha: int = 16
+    lora_dropout: float = 0.05
+    bias: str = "none"
+    target_modules: List[str] = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj"])
+
+@dataclass
+class TrainingConfig:
+    lora_config: LoraConfig = field(default_factory=LoraConfig)
 
 @dataclass
 class SystemConfig:
@@ -29,6 +50,9 @@ class SystemConfig:
     controller: ControllerConfig = field(default_factory=ControllerConfig)
     prioritization: PrioritizationConfig = field(default_factory=PrioritizationConfig)
     managers: ManagersConfig = field(default_factory=ManagersConfig)
+    queue: QueueConfig = field(default_factory=QueueConfig)
+    engine: EngineConfig = field(default_factory=EngineConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
 
 def load_config(config_path: str = "configs/config.yaml") -> Optional[SystemConfig]:
     """Loads system configuration from a YAML file into a SystemConfig object.
@@ -49,7 +73,7 @@ def load_config(config_path: str = "configs/config.yaml") -> Optional[SystemConf
 
         if not config_dict:
              logger.warning(f"Configuration file is empty: {config_path}")
-             return SystemConfig() # Return default config if file is empty
+             return SystemConfig()
 
         def update_dataclass(dc_instance, data_dict):
             for key, value in data_dict.items():

@@ -66,7 +66,7 @@ class ActiveTrainingJobManager:
                 dataset_ref=job_details.get('dataset_ref'),
                 priority_info=job_details.get('priority_info'),
                 adapter_save_path=job_details.get('adapter_save_path'),
-                max_steps=job_details.get('training_params', {}).get('max_steps'),
+                max_steps=job_details.get('max_steps'),
                 start_time=time.time()
             )
             self.active_jobs[job_id] = job_state
