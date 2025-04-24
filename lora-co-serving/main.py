@@ -2,6 +2,7 @@
 import logging
 import sys
 import time
+import threading
 from dataclasses import asdict
 
 from utils.logger_config import setup_logger
@@ -19,8 +20,7 @@ from core.training import setup_lora_training
 
 if __name__ == "__main__":
     # 1. Setup Logger
-    # Explicitly set log level to DEBUG to see detailed logs
-    setup_logger(log_level=logging.DEBUG) 
+    setup_logger(log_level=logging.DEBUG)
     logger = logging.getLogger(__name__)
     logger.info("Logging configured.")
 
@@ -81,12 +81,13 @@ if __name__ == "__main__":
     )
     logger.info("Main Controller initialized.")
 
-    # 8. [Optional] Submit Dummy Jobs/Requests for Testing
-    logger.info("Submitting dummy jobs/requests for testing...")
-    dummy_training_job = {
+    # 8. Submit Initial Dummy Jobs/Requests
+    logger.info("Submitting initial dummy jobs/requests...")
+    
+    dummy_training_job_1 = {
         "job_id": "dummy_train_job_1",
         "base_model_id": config.model.name,
-        "dataset_ref": "dummy_dataset_id",
+        "dataset_ref": "dummy_dataset_id_1",
         "max_steps": 10,
         "training_params": {
             "lr": 5e-5,
@@ -94,8 +95,22 @@ if __name__ == "__main__":
         },
         "adapter_save_path": "./adapters/dummy_train_job_1"
     }
-    queue_manager.add_training_job(dummy_training_job)
-    logger.info(f"Submitted dummy training job: {dummy_training_job['job_id']}")
+    queue_manager.add_training_job(dummy_training_job_1)
+    logger.info(f"Submitted dummy training job: {dummy_training_job_1['job_id']}")
+
+    dummy_training_job_2 = {
+        "job_id": "dummy_train_job_2",
+        "base_model_id": config.model.name,
+        "dataset_ref": "dummy_dataset_id_2",
+        "max_steps": 15,
+        "training_params": {
+            "lr": 3e-5,
+            "batch_size": 1,
+        },
+        "adapter_save_path": "./adapters/dummy_train_job_2"
+    }
+    queue_manager.add_training_job(dummy_training_job_2)
+    logger.info(f"Submitted dummy training job: {dummy_training_job_2['job_id']}")
 
     dummy_inference_req_base = {
         "request_id": "dummy_inf_req_base_1",
@@ -105,21 +120,42 @@ if __name__ == "__main__":
     queue_manager.add_inference_request(dummy_inference_req_base)
     logger.info(f"Submitted dummy inference request (base): {dummy_inference_req_base['request_id']}")
     
-    dummy_inference_req_adapter = {
-        "request_id": "dummy_inf_req_adapter_1",
-        "prompt": "Tell me about the dummy training job.",
+    logger.info("Starting controller loop in background thread...")
+    controller_thread = threading.Thread(target=controller.run_loop, daemon=True)
+    controller_thread.start()
+    logger.info("Controller thread started.")
+
+    WAIT_TIME_SECONDS = 5
+    logger.info(f"Main thread sleeping for {WAIT_TIME_SECONDS} seconds to allow jobs to complete...")
+    time.sleep(WAIT_TIME_SECONDS)
+    logger.info("Resuming main thread. Submitting post-training inference requests.")
+
+    dummy_inference_req_adapter_1 = {
+        "request_id": "dummy_inf_req_adapter_1_post",
+        "prompt": "Tell me about the first dummy training job.",
         "adapter_path": "./adapters/dummy_train_job_1"
     }
-    time.sleep(1) 
-    queue_manager.add_inference_request(dummy_inference_req_adapter)
-    logger.info(f"Submitted dummy inference request (adapter): {dummy_inference_req_adapter['request_id']}")
+    queue_manager.add_inference_request(dummy_inference_req_adapter_1)
+    logger.info(f"Submitted post-training inference request (adapter 1): {dummy_inference_req_adapter_1['request_id']}")
 
+    dummy_inference_req_adapter_2 = {
+        "request_id": "dummy_inf_req_adapter_2_post",
+        "prompt": "Tell me about the second dummy training job.",
+        "adapter_path": "./adapters/dummy_train_job_2"
+    }
+    queue_manager.add_inference_request(dummy_inference_req_adapter_2)
+    logger.info(f"Submitted post-training inference request (adapter 2): {dummy_inference_req_adapter_2['request_id']}")
 
-    # 9. Start the Controller Loop
-    logger.info("Starting the Main Controller loop...")
+    logger.info("Main thread waiting indefinitely to observe controller. Use Ctrl+C to exit.")
     try:
-        controller.run_loop()
-    except Exception as e:
-        logger.critical(f"Critical error during controller loop execution: {e}", exc_info=True)
+        while controller_thread.is_alive():
+             time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Ctrl+C received in main thread. Requesting controller stop...")
+        controller.stop_loop()
+        logger.info("Waiting for controller thread to finish...")
+        controller_thread.join(timeout=5.0)
+        if controller_thread.is_alive():
+             logger.warning("Controller thread did not stop gracefully within timeout.")
     finally:
-        logger.info("System shutting down.")
+        logger.info("System shutting down from main thread.")
