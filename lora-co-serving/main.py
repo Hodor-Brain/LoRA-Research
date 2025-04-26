@@ -102,12 +102,17 @@ if __name__ == "__main__":
     logger.info("Main Controller initialized.")
 
     # 8. Submit Initial Dummy Jobs/Requests
+    logger.info("Generating dummy datasets...")
+    dataset_1_texts = [f"Job 1 unique sample {i}. This is distinct data." for i in range(10)]
+    dataset_2_texts = [f"Job 2 different text sample {i}. Variation example." for i in range(12)]
+    dataset_3_texts = [f"Job 3 has shorter samples {i}." for i in range(5)]
+
     logger.info("Submitting initial dummy jobs/requests...")
     
     dummy_training_job_1 = {
         "job_id": "dummy_train_job_1",
         "base_model_id": config.model.name,
-        "dataset_ref": "dummy_dataset_id_1",
+        "dataset_samples": dataset_1_texts,
         "max_steps": 10,
         "training_params": {
             "lr": 5e-5,
@@ -121,7 +126,7 @@ if __name__ == "__main__":
     dummy_training_job_2 = {
         "job_id": "dummy_train_job_2",
         "base_model_id": config.model.name,
-        "dataset_ref": "dummy_dataset_id_2",
+        "dataset_samples": dataset_2_texts,
         "max_steps": 15,
         "training_params": {
             "lr": 3e-5,
@@ -149,11 +154,11 @@ if __name__ == "__main__":
     logger.info(f"Main thread sleeping for {WAIT_TIME_SECONDS} seconds to allow initial jobs to progress...")
     time.sleep(WAIT_TIME_SECONDS)
     logger.info("Resuming main thread. Submitting additional jobs/requests.")
-
+    
     dummy_training_job_3 = {
         "job_id": "dummy_train_job_3",
         "base_model_id": config.model.name,
-        "dataset_ref": "dummy_dataset_id_3",
+        "dataset_samples": dataset_3_texts,
         "max_steps": 6,
         "training_params": {
             "lr": 4e-5,

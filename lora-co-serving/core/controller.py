@@ -4,7 +4,7 @@ import logging
 import time
 import torch
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from dataclasses import asdict
 
 from utils.config_loader import SystemConfig
@@ -66,16 +66,19 @@ class MainController:
                  new_job_details['adapter_save_path'] = default_save_path
             
             logger.info(f"Received new training job request: {job_id}")
+            dataset_samples = new_job_details.get('dataset_samples')
+            
             registered_id = self.job_manager.register_job(new_job_details)
             if registered_id:
                 logger.info(f"Successfully registered job {registered_id}")
-                self._prepare_training_job_runtime(registered_id)
+                self._prepare_training_job_runtime(registered_id, dataset_samples)
             else:
                  logger.error(f"Failed to register job {job_id}")
 
-    def _prepare_training_job_runtime(self, job_id: str):
+    def _prepare_training_job_runtime(self, job_id: str, dataset_samples: Optional[List[str]] = None):
         """Sets up optimizer and potentially dataloader for a newly registered job."""
         job_state: Optional[TrainingJobState] = self.job_manager.get_job_state(job_id)
+
         if not job_state:
             logger.error(f"Cannot prepare runtime for job {job_id}: Job state not found.")
             return
@@ -85,13 +88,17 @@ class MainController:
 
         logger.info(f"Preparing runtime for job {job_id}...")
         optimizer = None
-        logger.info(f"Optimizer placeholder set for job {job_id}.")
+        logger.debug(f"Optimizer placeholder set for job {job_id}.")
         
+        train_dataset = None
         try:
-            logger.debug(f"Creating dummy dataset for job {job_id}...")
-            dummy_texts = [f"Data for job {job_id}, sample {i}." for i in range(8)]
-            train_dataset = SimpleTextDataset(dummy_texts, self.engine.tokenizer)
-            logger.debug(f"Dummy dataset created for job {job_id}.")
+            if not dataset_samples or not isinstance(dataset_samples, list):
+                logger.error(f"Job {job_id} submitted without valid 'dataset_samples' (received: {type(dataset_samples)}). Failing job.")
+                self.job_manager.fail_job(job_id, "Missing or invalid dataset_samples")
+                return
+            
+            logger.debug(f"Using provided dataset samples for job {job_id}. Count: {len(dataset_samples)}")
+            train_dataset = SimpleTextDataset(dataset_samples, self.engine.tokenizer)
 
             batch_size = job_state.training_params.get('batch_size', self.config.controller.training_batch_size or 1)
             logger.debug(f"Creating DataLoader for job {job_id} with batch size {batch_size}...")
@@ -111,9 +118,9 @@ class MainController:
             logger.info(f"Runtime successfully prepared and stored for job {job_id}.")
 
         except Exception as e:
-            logger.error(f"Error preparing runtime (dataloader/iterator) for job {job_id}: {e}", exc_info=True)
-            self.job_manager.fail_job(job_id, "Runtime preparation failed")
-            self.active_training_jobs.pop(job_id, None) 
+            logger.error(f"Error preparing runtime for job {job_id} (Dataset: {train_dataset is not None}): {e}", exc_info=True)
+            self.job_manager.fail_job(job_id, "Runtime preparation failed during Dataset/DataLoader creation")
+            self.active_training_jobs.pop(job_id, None)
         
     def _decide_mode(self) -> str:
         """Decides whether to run Inference or Training next."""
