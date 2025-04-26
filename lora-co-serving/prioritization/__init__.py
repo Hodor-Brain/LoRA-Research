@@ -2,4 +2,5 @@
 
 from .base_strategy import BasePrioritizationStrategy
 from .round_robin import RoundRobinStrategy
-from .novel_strategies import LeastProgressFirstStrategy # Add others as implemented 
+from .least_progress_first import LeastProgressFirstStrategy
+from .stagnation_aware import ForwardStagnationAwareStrategy, ReverseStagnationAwareStrategy
