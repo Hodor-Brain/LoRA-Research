@@ -15,6 +15,8 @@ from managers.queue_manager import QueueManager
 from managers.adapter_manager import LoRAAdapterManager
 from managers.job_manager import ActiveTrainingJobManager
 from prioritization.round_robin import RoundRobinStrategy
+from prioritization.stagnation_aware import ForwardStagnationAwareStrategy, ReverseStagnationAwareStrategy
+from prioritization.least_progress_first import LeastProgressFirstStrategy
 from core.controller import MainController
 from core.training import setup_lora_training
 
@@ -63,9 +65,27 @@ if __name__ == "__main__":
     engine = InferenceEngine(model, tokenizer, adapter_manager, device)
     logger.info("Managers and Inference Engine initialized.")
 
-    # 6. Initialize Prioritization Strategy
-    logger.info("Initializing prioritization strategy...")
-    prioritization_strategy = RoundRobinStrategy()
+    # 6. Initialize Prioritization Strategy based on Config
+    logger.info("Initializing prioritization strategy based on config...")
+    strategy_name = config.prioritization.strategy
+    strategy_params = config.prioritization.params if hasattr(config.prioritization, 'params') else {}
+
+    if strategy_name == "RoundRobin":
+        prioritization_strategy = RoundRobinStrategy(**strategy_params)
+        logger.info(f"Using RoundRobin strategy.")
+    elif strategy_name == "ForwardStagnationAware":
+        prioritization_strategy = ForwardStagnationAwareStrategy(**strategy_params)
+        logger.info(f"Using ForwardStagnationAware strategy with params: {strategy_params}")
+    elif strategy_name == "ReverseStagnationAware":
+        prioritization_strategy = ReverseStagnationAwareStrategy(**strategy_params)
+        logger.info(f"Using ReverseStagnationAware strategy with params: {strategy_params}")
+    elif strategy_name == "LeastProgressFirst":
+        prioritization_strategy = LeastProgressFirstStrategy(**strategy_params)
+        logger.info(f"Using LeastProgressFirst strategy with params: {strategy_params}")
+    else:
+        logger.warning(f"Unknown prioritization strategy '{strategy_name}' configured. Falling back to RoundRobin.")
+        prioritization_strategy = RoundRobinStrategy()
+
     logger.info("Prioritization Strategy initialized.")
 
     # 7. Initialize Main Controller
@@ -126,9 +146,23 @@ if __name__ == "__main__":
     logger.info("Controller thread started.")
 
     WAIT_TIME_SECONDS = 5
-    logger.info(f"Main thread sleeping for {WAIT_TIME_SECONDS} seconds to allow jobs to complete...")
+    logger.info(f"Main thread sleeping for {WAIT_TIME_SECONDS} seconds to allow initial jobs to progress...")
     time.sleep(WAIT_TIME_SECONDS)
-    logger.info("Resuming main thread. Submitting post-training inference requests.")
+    logger.info("Resuming main thread. Submitting additional jobs/requests.")
+
+    dummy_training_job_3 = {
+        "job_id": "dummy_train_job_3",
+        "base_model_id": config.model.name,
+        "dataset_ref": "dummy_dataset_id_3",
+        "max_steps": 6,
+        "training_params": {
+            "lr": 4e-5,
+            "batch_size": 1,
+        },
+        "adapter_save_path": "./adapters/dummy_train_job_3"
+    }
+    queue_manager.add_training_job(dummy_training_job_3)
+    logger.info(f"Submitted dynamic training job: {dummy_training_job_3['job_id']}")
 
     dummy_inference_req_adapter_1 = {
         "request_id": "dummy_inf_req_adapter_1_post",
