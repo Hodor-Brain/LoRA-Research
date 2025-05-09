@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Iterator
 from enum import Enum
 import time
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class ActiveTrainingJobManager:
     def __init__(self):
         """Initializes the manager for active training jobs."""
         self.active_jobs: Dict[str, TrainingJobState] = {}
+        self.lock = Lock()
         logger.info("ActiveTrainingJobManager initialized.")
 
     def register_job(self, job_details: Dict[str, Any]) -> Optional[str]:
@@ -137,9 +139,10 @@ class ActiveTrainingJobManager:
         return self.active_jobs
     
     def get_active_runnable_job_states(self) -> Dict[str, TrainingJobState]:
-        """Gets the states of jobs that are currently ACTIVE and not yet completed/failed."""
-        return { jid: state for jid, state in self.active_jobs.items() 
-                 if state.status == JobStatus.ACTIVE }
+        """Returns a dictionary of job_id -> TrainingJobState for jobs that are ACTIVE or PENDING."""
+        with self.lock:
+            return {job_id: state for job_id, state in self.active_jobs.items() 
+                    if state.status in [JobStatus.ACTIVE, JobStatus.PENDING]}
 
     def complete_job(self, job_id: str) -> bool:
         """Marks a job as completed (alternative to update_job_state with status)."""
@@ -150,6 +153,12 @@ class ActiveTrainingJobManager:
          """Marks a job as failed (alternative to update_job_state with error)."""
          logger.info(f"Marking job {job_id} as failed.")
          return self.update_job_state(job_id, status=JobStatus.FAILED, error_message=error_message)
+
+    def get_all_job_states(self) -> Dict[str, TrainingJobState]:
+        """Returns a copy of the dictionary containing all tracked job states."""
+        with self.lock:
+            # Return a copy to prevent external modification of the internal dict
+            return dict(self.active_jobs)
 
     # Optional: Method to remove completed/failed jobs after some time?
     # def cleanup_jobs(self):

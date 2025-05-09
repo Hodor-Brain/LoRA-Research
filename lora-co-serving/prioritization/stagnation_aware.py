@@ -55,18 +55,18 @@ class ForwardStagnationAwareStrategy(BasePrioritizationStrategy):
             progress_rate = self._calculate_progress_rate(job_id)
 
             if progress_rate is None:
-                logger.debug(f"FSA: No progress history for job {job_id}, assigning neutral rate.")
+                logger.debug(f"FSA: No progress history for job {job_id}, assigning neutral rate 0.0.")
                 progress_rate = 0.0
 
             if progress_rate >= self.stagnation_threshold:
                  candidate_jobs.append((progress_rate, job_id))
                  logger.debug(f"FSA: Job {job_id} is progressing (rate={progress_rate:.4f}). Added as candidate.")
             else:
-                 logger.debug(f"FSA: Job {job_id} is considered stagnated (rate={progress_rate:.4f} < threshold={self.stagnation_threshold}). Excluding.")
+                 logger.debug(f"FSA: Job {job_id} is considered stagnated or has insufficient history (rate={progress_rate:.4f} < threshold={self.stagnation_threshold}). Excluding.")
 
 
         if not candidate_jobs:
-            logger.warning("FSA: No non-stagnated active jobs found. Selecting based on least progress?")
+            logger.warning("FSA: No non-stagnated candidate jobs found. Falling back to Round Robin.")
             rr_fallback = RoundRobinStrategy()
             selected_job_id = rr_fallback.select_next_job(active_jobs)
             logger.warning(f"FSA: Fallback to Round Robin selected: {selected_job_id}")

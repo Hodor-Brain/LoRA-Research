@@ -3,6 +3,8 @@
 import pytest
 from collections import deque
 from prioritization.stagnation_aware import ForwardStagnationAwareStrategy, ReverseStagnationAwareStrategy
+from prioritization.least_progress_first import LeastProgressFirstStrategy
+from dataclasses import dataclass
 
 # --- Fixtures ---
 
@@ -13,6 +15,15 @@ def forward_strategy():
 @pytest.fixture
 def reverse_strategy():
     return ReverseStagnationAwareStrategy(history_window=5, slow_progress_threshold=0.005)
+
+@pytest.fixture
+def lpf_strategy():
+    return LeastProgressFirstStrategy()
+
+# --- Mock Job State Object ---
+@dataclass
+class MockJobState:
+    current_step: int = 0
 
 # --- Test ForwardStagnationAwareStrategy ---
 
@@ -123,4 +134,59 @@ class TestReverseStagnationAwareStrategy:
     def test_select_next_job_only_no_history_fallback(self, reverse_strategy):
         active_jobs = {"job1": {}, "job2": {}}
         assert reverse_strategy.select_next_job(active_jobs) == "job1"
+
+
+# --- Test LeastProgressFirstStrategy ---
+
+class TestLeastProgressFirstStrategy:
+
+    def test_select_next_job_empty(self, lpf_strategy):
+        assert lpf_strategy.select_next_job({}) is None
+
+    def test_select_next_job_one_job(self, lpf_strategy):
+        active_jobs = {"job1": MockJobState(current_step=5)}
+        assert lpf_strategy.select_next_job(active_jobs) == "job1"
+
+    def test_select_next_job_clear_winner(self, lpf_strategy):
+        active_jobs = {
+            "job1": MockJobState(current_step=10),
+            "job2": MockJobState(current_step=5),
+            "job3": MockJobState(current_step=15)
+        }
+        assert lpf_strategy.select_next_job(active_jobs) == "job2"
+
+    def test_select_next_job_tie(self, lpf_strategy):
+        active_jobs = {
+            "job1": MockJobState(current_step=10),
+            "job2": MockJobState(current_step=5),
+            "job3": MockJobState(current_step=15),
+            "job4": MockJobState(current_step=5)
+        }
+        assert lpf_strategy.select_next_job(active_jobs) == "job2"
+
+    def test_select_next_job_non_integer_steps(self, lpf_strategy):
+        active_jobs = {
+            "job1": MockJobState(current_step=10),
+            "job2": MockJobState(current_step="invalid"),
+            "job3": MockJobState(current_step=5)
+        }
+        assert lpf_strategy.select_next_job(active_jobs) == "job3"
+
+    def test_select_next_job_missing_attribute(self, lpf_strategy):
+        @dataclass
+        class BadMockJobState:
+            other_field: int = 0
+            
+        active_jobs = {
+            "job1": MockJobState(current_step=10),
+            "job2": BadMockJobState(other_field=5),
+            "job3": MockJobState(current_step=5)
+        }
+        assert lpf_strategy.select_next_job(active_jobs) == "job3"
+
+    def test_update_state_runs(self, lpf_strategy):
+        try:
+            lpf_strategy.update_state('ANY_EVENT', {'detail': 'value'})
+        except Exception as e:
+            pytest.fail(f"LPF update_state raised an exception: {e}")
         

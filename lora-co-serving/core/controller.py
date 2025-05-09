@@ -4,8 +4,9 @@ import logging
 import time
 import torch
 import os
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any, Tuple
 from dataclasses import asdict
+from threading import Lock, Event
 
 from utils.config_loader import SystemConfig
 from core.engine import InferenceEngine
@@ -49,6 +50,13 @@ class MainController:
         self.model_dtype = model_dtype
         self.running = False
         self.active_training_jobs: Dict[str, Dict] = {}
+        self._stop_event = Event()
+        self.lock = Lock()
+        
+        # Storage for completed inference results with metrics
+        self.completed_inference_results: List[Dict[str, Any]] = []
+        self.inference_results_lock = Lock()
+
         logger.info("MainController initialized.")
 
     def _check_for_new_jobs(self):
@@ -142,33 +150,58 @@ class MainController:
         logger.debug("Decision: Idle mode (no pending requests or runnable jobs)")
         return "idle"
 
-    def _execute_inference_batch(self):
-        """Gets requests from queue and runs inference."""
-        batch_size = self.config.controller.inference_batch_size
-        requests = self.queue_manager.get_inference_batch(batch_size)
-        if not requests:
-            logger.debug("Inference batch execution skipped: Queue empty.")
-            return
+    def _execute_inference_batch(self, batch: List[Dict[str, Any]]):
+        """Executes a batch of inference requests."""
+        logger.info(f"Executing inference batch of size {len(batch)}.")
+        start_time = time.time()
+        try:
+            # The engine now returns detailed results
+            results = self.engine.process_batch(batch)
+            
+            # Store the detailed results
+            with self.inference_results_lock:
+                self.completed_inference_results.extend(results)
+                
+            # Optional: Log summary or handle results (e.g., push to another queue)
+            successful_count = sum(1 for r in results if r.get('output') is not None and r.get('error') is None)
+            failed_count = len(results) - successful_count
+            logger.info(f"Inference batch execution finished. Successful: {successful_count}, Failed: {failed_count}")
+            # Example: Log latency for the first result if available
+            # if results and results[0].get('processing_end_time') and results[0].get('submission_time'):
+            #    latency = results[0]['processing_end_time'] - results[0]['submission_time']
+            #    logger.debug(f"First request E2E latency: {latency:.4f}s")
+            
+        except Exception as e:
+            logger.error(f"Error during inference batch execution: {e}", exc_info=True)
+            # Store error info for all requests in the batch if the whole batch failed
+            error_time = time.time()
+            error_results = []
+            for req in batch:
+                error_results.append({
+                    'request_id': req.get('request_id', 'unknown'),
+                    'submission_time': req.get('submission_time'),
+                    'processing_start_time': None,
+                    'processing_end_time': error_time,
+                    'output': None,
+                    'error': f"Batch processing error: {str(e)}"
+                })
+            with self.inference_results_lock:
+                self.completed_inference_results.extend(error_results)
+        finally:
+            end_time = time.time()
+            logger.debug(f"Inference batch took {end_time - start_time:.4f} seconds.")
 
-        logger.info(f"Executing inference batch of size {len(requests)}.")
-        results = self.engine.process_batch(requests)
-        logger.info(f"Inference batch execution finished. Results count: {len(results) if results else 0}")
-
-    def _execute_training_batch(self):
-        """Selects a job, loads its state, runs a step, saves state."""
-        runnable_jobs = self.job_manager.get_active_runnable_job_states()
-        prepared_runnable_jobs = {jid: state for jid, state in runnable_jobs.items() if jid in self.active_training_jobs}
-
-        if not prepared_runnable_jobs:
-             logger.debug("Training batch execution skipped: No runnable jobs with prepared runtime.")
+    def _execute_training_batch(self, job_id: str):
+        """Runs a training step for the specified job_id."""
+        if not job_id:
+             logger.error("_execute_training_batch called with no job_id")
              return
-        
-        selected_job_id = self.prioritization_strategy.select_next_job(prepared_runnable_jobs)
-        if not selected_job_id:
-            logger.debug("Training batch execution skipped: Prioritization returned no job from prepared set.")
-            return
-        
-        logger.info(f"Selected training job {selected_job_id} for next step.")
+
+        logger.debug(f"Attempting training step execution for job: {job_id}")
+        # Make sure the rest of the logic uses this specific job_id 
+        # instead of re-selecting via prioritization strategy.
+        selected_job_id = job_id # Use the provided job ID
+
         job_state = self.job_manager.get_job_state(selected_job_id)
         
         if selected_job_id not in self.active_training_jobs:
@@ -335,18 +368,40 @@ class MainController:
                     optimizer_state_dict=optimizer.state_dict(), 
                     adapter_save_path=adapter_path
                 )
-                time.sleep(0.1)
+                # Notify strategy about completion *before* removing job info 
+                event_details = {
+                    'job_id': selected_job_id,
+                    'loss': loss,
+                    'current_step': current_step_val,
+                    'status': JobStatus.COMPLETED.name # Explicitly COMPLETED
+                }
+                self.prioritization_strategy.update_state('STATUS_UPDATE', event_details)
+                logger.debug(f"Called strategy update_state for COMPLETED job {selected_job_id}")
+                
+                time.sleep(0.1) # Keep potential small delay for file ops
                 self.active_training_jobs.pop(selected_job_id, None)
                 self.adapter_manager.unload_training_adapter(selected_job_id)
                 return
             else:
+                # Save intermediate state
                 self.adapter_manager.save_training_state(
                     job_id=selected_job_id,
                     model_to_save=current_peft_model,
                     optimizer_state_dict=optimizer.state_dict(),
                     adapter_save_path=adapter_path
                 )
-                time.sleep(0.1)
+                
+                # --- ADDED: Update prioritization strategy state for ongoing job --- 
+                event_details = {
+                    'job_id': selected_job_id,
+                    'loss': loss,
+                    'current_step': current_step_val,
+                    'status': job_state.status.name
+                }
+                self.prioritization_strategy.update_state('STEP_COMPLETED', event_details)
+                logger.debug(f"Called strategy update_state for job {selected_job_id} after step {current_step_val}")
+                # -------------------------------------------------
+
         else:
             logger.error(f"Training step failed for job {selected_job_id} (loss is None). Failing job.")
             self.job_manager.fail_job(selected_job_id, "Training step execution failed")
@@ -354,31 +409,81 @@ class MainController:
             self.adapter_manager.unload_training_adapter(selected_job_id)
 
     def run_loop(self):
-        """Runs the main control loop, alternating between modes."""
-        self.running = True
+        """Main execution loop deciding between inference and training."""
         logger.info("Starting Main Controller loop...")
-        while self.running:
-            try:
-                self._check_for_new_jobs()
+        self.running = True
+        try:
+            while not self._stop_event.is_set():
+                action, details = self._get_next_action()
 
-                mode = self._decide_mode()
-                if mode == "inference":
-                    self._execute_inference_batch()
-                elif mode == "training":
-                    self._execute_training_batch()
-                elif mode == "idle":
+                if action == 'INFERENCE':
+                    inference_batch = self.queue_manager.get_inference_batch(self.config.controller.inference_batch_size)
+                    if inference_batch:
+                        self._execute_inference_batch(inference_batch)
+                    else:
+                        # Avoid busy-waiting if queues are empty
+                        time.sleep(0.01)
+                elif action == 'TRAINING':
+                    job_id = details.get('job_id')
+                    if job_id:
+                         self._execute_training_batch(job_id)
+                    else:
+                        # No jobs ready or selected, sleep briefly
+                        time.sleep(0.01)
+                elif action == 'CHECK_NEW_JOBS':
+                     self._check_for_new_jobs()
+                elif action == 'IDLE':
+                    time.sleep(0.1) # Sleep longer when idle
+                else:
+                    logger.warning(f"Unknown action: {action}. Sleeping briefly.")
                     time.sleep(0.1)
 
-            except KeyboardInterrupt:
-                logger.info("KeyboardInterrupt received. Stopping controller loop...")
-                self.running = False
-            except Exception as e:
-                 logger.error(f"Unexpected error in controller loop: {e}", exc_info=True)
-                 time.sleep(1)
+                # Optional: Check for completed/failed jobs to clean up?
+                # self.job_manager.cleanup_finished_jobs()
 
-        logger.info("Main Controller loop stopped.")
+        except Exception as e:
+            logger.error(f"Exception in controller loop: {e}", exc_info=True)
+        finally:
+            self.running = False
+            logger.info("Main Controller loop stopped.")
 
     def stop_loop(self):
         """Signals the controller loop to stop."""
         logger.info("Requesting controller loop stop.")
-        self.running = False 
+        self._stop_event.set() 
+
+    def get_completed_inference_results(self) -> List[Dict[str, Any]]:
+        """Safely retrieves the collected inference results."""
+        with self.inference_results_lock:
+            results_copy = list(self.completed_inference_results)
+            return results_copy
+
+    def _get_next_action(self) -> Tuple[str, Dict[str, Any]]:
+        """Determines the next action for the controller loop."""
+        # Priority 1: Check for new training jobs to register
+        if self.queue_manager.get_training_queue_size() > 0:
+            logger.debug("Next Action: CHECK_NEW_JOBS")
+            return "CHECK_NEW_JOBS", {}
+            
+        # Priority 2: Handle inference requests if available
+        if self.queue_manager.get_inference_queue_size() > 0:
+            logger.debug("Next Action: INFERENCE")
+            return "INFERENCE", {}
+
+        # Priority 3: Perform a training step if possible
+        runnable_jobs = self.job_manager.get_active_runnable_job_states()
+        prepared_runnable_jobs = {jid: state for jid, state in runnable_jobs.items() if jid in self.active_training_jobs}
+        if prepared_runnable_jobs:
+            selected_job_id = self.prioritization_strategy.select_next_job(prepared_runnable_jobs)
+            if selected_job_id:
+                logger.debug(f"Next Action: TRAINING (Job: {selected_job_id})")
+                return "TRAINING", {"job_id": selected_job_id}
+            else:
+                 logger.debug("Next Action: IDLE (Runnable jobs exist, but prioritization returned None)")
+                 return "IDLE", {}
+        elif runnable_jobs: # Runnable jobs exist, but none have runtime prepared yet
+            logger.debug("Next Action: IDLE (Waiting for runtime preparation)")
+            return "IDLE", {}
+        else: # No runnable jobs at all
+             logger.debug("Next Action: IDLE (No runnable training jobs)")
+             return "IDLE", {} 

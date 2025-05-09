@@ -6,7 +6,7 @@ import torch
 import json
 from peft import PeftModel, PeftConfig, LoraConfig
 from transformers import PreTrainedModel
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List, Set
 from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
@@ -24,29 +24,33 @@ class LoRAAdapterManager:
 
     def load_inference_adapter(self, adapter_path: str) -> Optional[PeftModel]:
         """Loads or activates a LoRA adapter for inference.
+        If switching from a training adapter, disables it but DOES NOT DELETE it.
         Assumes adapter files (config, weights) are in adapter_path/job_id/.
-        Ensures any active training adapter is deleted first.
         Args:
             adapter_path (str): The base directory path (e.g., ./adapters/job_id).
         Returns:
             Optional[PeftModel]: The base model with the adapter loaded/activated, or None on failure.
         """
-        if not adapter_path:
-            logger.debug("No adapter path provided for inference, using base model.")
+        # --- Handle switching away from active training adapter --- 
+        previous_training_id = self.active_training_adapter_job_id
+        if previous_training_id is not None:
+            logger.warning(f"Active training adapter '{previous_training_id}' found when switching to inference/base model. Disabling it (but not deleting).)")
             try:
-                previous_training_id = self.active_training_adapter_job_id
-                if previous_training_id is not None:
-                    logger.warning(f"Active training adapter '{previous_training_id}' found when switching to base model. Deleting it.")
-                    self._delete_adapter_safely(previous_training_id)
-                    self.active_training_adapter_job_id = None
-                    
                 if hasattr(self.base_model, 'disable_adapter'):
                     self.base_model.disable_adapter()
-                    logger.debug("Disabled any active adapter for base model inference.")
-                    
+                    logger.debug(f"Disabled adapter '{previous_training_id}'.")
+                else:
+                    logger.warning("Model has no disable_adapter method.")
+                self.active_training_adapter_job_id = None # Mark as inactive
             except Exception as e:
-                 logger.warning(f"Could not disable/delete adapter for base model inference: {e}")
-            self.base_model.eval()
+                logger.error(f"Error disabling previous training adapter '{previous_training_id}': {e}", exc_info=True)
+                # Proceed? Or return None? Let's proceed but log the error.
+        # --------------------------------------------------------
+
+        if not adapter_path:
+            logger.debug("No adapter path provided for inference, using base model.")
+            # No need to delete here, already disabled above if one was active.
+            self.base_model.eval() # Ensure model is in eval mode
             return self.base_model
 
         normalized_base_path = os.path.normpath(adapter_path)
@@ -57,15 +61,7 @@ class LoRAAdapterManager:
         logger.debug(f"Request to load inference adapter '{adapter_name}' from '{actual_adapter_dir}'")
 
         try:
-            previous_training_id = self.active_training_adapter_job_id
-            if previous_training_id is not None:
-                 logger.warning(f"Active training adapter '{previous_training_id}' found when loading inference adapter '{adapter_name}'. Deleting training adapter.")
-                 if not self._delete_adapter_safely(previous_training_id):
-                      logger.error(f"Failed to delete active training adapter '{previous_training_id}'. Aborting inference load.")
-                      return None
-                 self.active_training_adapter_job_id = None
-                 logger.debug(f"Training adapter '{previous_training_id}' deleted.")
-                 
+            # Previous training adapter was handled above (disabled, not deleted)
             adapter_already_in_model = adapter_name in getattr(self.base_model, 'peft_config', {})
 
             if adapter_already_in_model:
@@ -94,7 +90,7 @@ class LoRAAdapterManager:
                 self.base_model.set_adapter(adapter_name)
             
             self.base_model.eval() 
-            self.active_training_adapter_job_id = None
+            # self.active_training_adapter_job_id = None # Already set above
             logger.info(f"Adapter '{adapter_name}' active for inference.")
             return self.base_model 
 
@@ -296,3 +292,12 @@ class LoRAAdapterManager:
                  logger.debug(f"Marked job '{job_id}' as inactive in adapter manager state.")
              else:
                  logger.debug(f"Unload called for '{job_id}', but '{self.active_training_adapter_job_id}' was active. Active state unchanged.") 
+
+    def get_active_adapters(self) -> Set[str]:
+        """Returns the set of adapter names currently loaded in the base model."""
+        try:
+            peft_config = getattr(self.base_model, 'peft_config', {})
+            return set(peft_config.keys())
+        except Exception as e:
+            logger.error(f"Error getting active adapters: {e}", exc_info=True)
+            return set() 
