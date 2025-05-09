@@ -1,0 +1,14 @@
+# Configuration file for the system
+
+model:
+  name: "./models_store/Qwen-Qwen2-0.5B-Instruct" # Local path where the model was downloaded
+
+controller:
+  inference_batch_size: 4
+  training_steps_per_batch: 1 # How many steps to run for the selected job
+
+prioritization:
+  strategy: "RoundRobin" # Options: RoundRobin, LeastProgressFirst, etc.
+
+managers:
+  adapter_cache_size: 3 # Max inference adapters in VRAM

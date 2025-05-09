@@ -1,0 +1,13 @@
+{
+  "base_model_name_or_path": "./models_store/Qwen-Qwen2-0.5B-Instruct",
+  "peft_type": "LORA",
+  "task_type": "CAUSAL_LM",
+  "r": 8,
+  "lora_alpha": 16,
+  "lora_dropout": 0.05,
+  "target_modules": [
+    "q_proj",
+    "v_proj"
+  ],
+  "bias": "none"
+} 
